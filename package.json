@@ -3,8 +3,7 @@
   "version": "1.0.0",
   "description": "Daily event expiry checker for dermamedical.co.uk",
   "dependencies": {
-    "cheerio": "^1.0.0",
-    "nodemailer": "^6.9.9"
+    "cheerio": "^1.0.0"
   },
   "engines": {
     "node": ">=18"

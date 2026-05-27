@@ -1,5 +1,4 @@
 const cheerio = require('cheerio');
-const nodemailer = require('nodemailer');
 
 const URLS = [
   'https://dermamedical.co.uk/',
@@ -57,7 +56,6 @@ function extractEvents(html, url) {
   const $ = cheerio.load(html);
   const events = [];
 
-  // Try structured event elements
   $('[class*="tribe-event"], [class*="event-item"], article.type-tribe_events').each((i, el) => {
     const title = $(el).find('[class*="tribe-event-title"], [class*="event-title"], h2, h3, h4').first().text().trim();
     const dateEl = $(el).find('[class*="tribe-event-date"], [class*="datetime"], time, .event-date').first();
@@ -67,7 +65,6 @@ function extractEvents(html, url) {
     }
   });
 
-  // Fallback: <time> tags
   if (events.length === 0) {
     $('time').each((i, el) => {
       const dt = $(el).attr('datetime') || $(el).text().trim();
@@ -76,7 +73,6 @@ function extractEvents(html, url) {
     });
   }
 
-  // Last resort: raw date strings
   if (events.length === 0) {
     const bodyText = $('main, #content, .content, body').text();
     const dates = parseDates(bodyText);
@@ -92,45 +88,65 @@ function extractEvents(html, url) {
 }
 
 async function sendEmail(expired, expiringSoon) {
-  const user = process.env.SMTP_USER;
-  const pass = process.env.SMTP_PASS;
+  const apiKey = process.env.RESEND_API_KEY;
   const recipients = (process.env.NOTIFY_EMAILS || '').split(',').map(e => e.trim()).filter(Boolean);
 
-  if (!user || !pass || recipients.length === 0) {
-    log('Email not configured, skipping');
+  if (!apiKey || recipients.length === 0) {
+    log('Resend not configured, skipping email');
     return false;
   }
 
-  const transporter = nodemailer.createTransport({
-    host: process.env.SMTP_HOST || 'smtp.gmail.com',
-    port: parseInt(process.env.SMTP_PORT || '587'),
-    secure: false,
-    auth: { user, pass }
-  });
-
   const now = new Date().toLocaleString('en-GB', { timeZone: 'Europe/London' });
-  let body = `Derma Medical Event Parser — Alert\nScanned: ${now} BST\n\n`;
+
+  let html = `
+    <div style="font-family:sans-serif;max-width:600px;margin:0 auto;padding:24px">
+      <h2 style="color:#c0392b;margin-bottom:4px">⚠️ Derma Medical — Event Alert</h2>
+      <p style="color:#666;margin-top:0">Scanned at ${now} BST</p>
+      <hr style="border:none;border-top:1px solid #eee;margin:16px 0">
+  `;
 
   if (expired.length > 0) {
-    body += `⚠️ EXPIRED EVENTS (${expired.length}):\n`;
-    expired.forEach(e => { body += `  • ${e.title} — ${e.dateStr}\n    ${e.source}\n`; });
-    body += '\n';
+    html += `<h3 style="color:#c0392b">Expired events (${expired.length})</h3><ul>`;
+    expired.forEach(e => {
+      html += `<li style="margin-bottom:6px"><strong>${e.title}</strong><br>
+        <span style="color:#999;font-size:13px">${e.dateStr} · <a href="${e.source}">${e.source}</a></span></li>`;
+    });
+    html += '</ul>';
   }
-  if (expiringSoon.length > 0) {
-    body += `⏰ EXPIRING SOON (within ${process.env.WARN_DAYS || 7} days):\n`;
-    expiringSoon.forEach(e => { body += `  • ${e.title} — ${e.dateStr}\n    ${e.source}\n`; });
-    body += '\n';
-  }
-  body += 'This is an automated alert. Parser runs daily at 00:00 BST.\nhttps://dermamedical.co.uk/events/';
 
-  await transporter.sendMail({
-    from: `"Derma Event Parser" <${user}>`,
-    to: recipients.join(', '),
-    subject: `⚠️ Expired events on dermamedical.co.uk — ${new Date().toLocaleDateString('en-GB')}`,
-    text: body
+  if (expiringSoon.length > 0) {
+    html += `<h3 style="color:#e67e22">Expiring soon (${expiringSoon.length})</h3><ul>`;
+    expiringSoon.forEach(e => {
+      html += `<li style="margin-bottom:6px"><strong>${e.title}</strong><br>
+        <span style="color:#999;font-size:13px">${e.dateStr} · <a href="${e.source}">${e.source}</a></span></li>`;
+    });
+    html += '</ul>';
+  }
+
+  html += `
+      <hr style="border:none;border-top:1px solid #eee;margin:16px 0">
+      <p style="color:#aaa;font-size:12px">Automated alert · runs daily at 00:00 BST · 
+        <a href="https://dermamedical.co.uk/events/" style="color:#aaa">dermamedical.co.uk/events</a></p>
+    </div>
+  `;
+
+  const res = await fetch('https://api.resend.com/emails', {
+    method: 'POST',
+    headers: {
+      'Authorization': `Bearer ${apiKey}`,
+      'Content-Type': 'application/json'
+    },
+    body: JSON.stringify({
+      from: 'Derma Event Parser <onboarding@resend.dev>',
+      to: recipients,
+      subject: `⚠️ Expired events on dermamedical.co.uk — ${new Date().toLocaleDateString('en-GB')}`,
+      html
+    })
   });
 
-  log(`Email sent to: ${recipients.join(', ')}`);
+  const data = await res.json();
+  if (!res.ok) throw new Error(`Resend error: ${JSON.stringify(data)}`);
+  log(`Email sent via Resend, id: ${data.id}`);
   return true;
 }
 
@@ -155,11 +171,9 @@ module.exports = async function handler(req, res) {
       const events = extractEvents(html, url);
       const expired = events.filter(e => e.status === 'expired');
       const expiringSoon = events.filter(e => e.status === 'expiring_soon');
-      const upcoming = events.filter(e => e.status === 'upcoming');
-
       allExpired.push(...expired);
       allExpiringSoon.push(...expiringSoon);
-      summary.push({ url, total: events.length, expired: expired.length, expiringSoon: expiringSoon.length, upcoming: upcoming.length, events: events.slice(0, 20) });
+      summary.push({ url, total: events.length, expired: expired.length, expiringSoon: expiringSoon.length, events: events.slice(0, 20) });
       log(`${url}: ${events.length} events, ${expired.length} expired, ${expiringSoon.length} expiring soon`);
     }
 
