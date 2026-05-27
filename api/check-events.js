@@ -169,7 +169,7 @@ async function sendEmail(expired, expiringSoon) {
       'Content-Type': 'application/json'
     },
     body: JSON.stringify({
-      from: 'Derma Event Parser <noreply@dermamedical.co.uk>',
+      from: 'Derma Event Parser <onboarding@resend.dev>',
       to: recipients,
       subject: `⚠️ Expired events on dermamedical.co.uk — ${new Date().toLocaleDateString('en-GB')}`,
       html
