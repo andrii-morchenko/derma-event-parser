@@ -27,6 +27,7 @@ function parseDates(text) {
 }
 
 function parseDate(str) {
+  if (!str) return null;
   const cleaned = str.replace(/(\d+)(st|nd|rd|th)/gi, '$1');
   const d = new Date(cleaned);
   return isNaN(d.getTime()) ? null : d;
@@ -56,10 +57,10 @@ function extractEvents(html, url) {
   const $ = cheerio.load(html);
   const events = [];
 
-  // Try structured event elements first
-  $('[class*="tribe-event"], [class*="event-item"], article.type-tribe_events, .elementor-post').each((i, el) => {
+  // Try structured event elements
+  $('[class*="tribe-event"], [class*="event-item"], article.type-tribe_events').each((i, el) => {
     const title = $(el).find('[class*="tribe-event-title"], [class*="event-title"], h2, h3, h4').first().text().trim();
-    const dateEl = $(el).find('[class*="tribe-event-date"], [class*="datetime"], time, .event-date, [class*="date"]').first();
+    const dateEl = $(el).find('[class*="tribe-event-date"], [class*="datetime"], time, .event-date').first();
     const dateText = dateEl.attr('datetime') || dateEl.text().trim();
     if (title || dateText) {
       events.push({ title: title || `Event ${i + 1}`, dateStr: dateText, source: url });
@@ -75,7 +76,7 @@ function extractEvents(html, url) {
     });
   }
 
-  // Last resort: raw date strings from body text
+  // Last resort: raw date strings
   if (events.length === 0) {
     const bodyText = $('main, #content, .content, body').text();
     const dates = parseDates(bodyText);
@@ -84,11 +85,10 @@ function extractEvents(html, url) {
     });
   }
 
-  return events.map(e => ({
-    ...e,
-    date: parseDate(e.dateStr),
-    status: classifyDate(parseDate(e.dateStr))
-  }));
+  return events.map(e => {
+    const date = parseDate(e.dateStr);
+    return { ...e, date, status: classifyDate(date) };
+  });
 }
 
 async function sendEmail(expired, expiringSoon) {
@@ -117,8 +117,7 @@ async function sendEmail(expired, expiringSoon) {
     body += '\n';
   }
   if (expiringSoon.length > 0) {
-    const days = process.env.WARN_DAYS || '7';
-    body += `⏰ EXPIRING SOON (within ${days} days) — ${expiringSoon.length} events:\n`;
+    body += `⏰ EXPIRING SOON (within ${process.env.WARN_DAYS || 7} days):\n`;
     expiringSoon.forEach(e => { body += `  • ${e.title} — ${e.dateStr}\n    ${e.source}\n`; });
     body += '\n';
   }
@@ -135,19 +134,14 @@ async function sendEmail(expired, expiringSoon) {
   return true;
 }
 
-export default async function handler(req, res) {
-  // Allow GET (manual trigger) and cron calls
+module.exports = async function handler(req, res) {
   if (req.method !== 'GET' && req.method !== 'POST') {
     return res.status(405).json({ error: 'Method not allowed' });
   }
 
-  // Verify cron secret if set
   const secret = process.env.CRON_SECRET;
-  if (secret) {
-    const auth = req.headers.authorization;
-    if (auth !== `Bearer ${secret}`) {
-      return res.status(401).json({ error: 'Unauthorized' });
-    }
+  if (secret && req.headers.authorization !== `Bearer ${secret}`) {
+    return res.status(401).json({ error: 'Unauthorized' });
   }
 
   log('=== Starting event check ===');
@@ -165,29 +159,18 @@ export default async function handler(req, res) {
 
       allExpired.push(...expired);
       allExpiringSoon.push(...expiringSoon);
-
-      summary.push({
-        url,
-        total: events.length,
-        expired: expired.length,
-        expiringSoon: expiringSoon.length,
-        upcoming: upcoming.length,
-        events: events.slice(0, 20)
-      });
-
+      summary.push({ url, total: events.length, expired: expired.length, expiringSoon: expiringSoon.length, upcoming: upcoming.length, events: events.slice(0, 20) });
       log(`${url}: ${events.length} events, ${expired.length} expired, ${expiringSoon.length} expiring soon`);
     }
 
     let emailSent = false;
     if (allExpired.length > 0 || allExpiringSoon.length > 0) {
-      log(`Action needed: ${allExpired.length} expired, ${allExpiringSoon.length} expiring soon`);
       emailSent = await sendEmail(allExpired, allExpiringSoon);
     } else {
       log('All events current — no alert needed');
     }
 
     log('=== Check complete ===');
-
     return res.status(200).json({
       ok: true,
       scannedAt: new Date().toISOString(),
@@ -201,4 +184,4 @@ export default async function handler(req, res) {
     log(`Error: ${err.message}`);
     return res.status(500).json({ ok: false, error: err.message });
   }
-}
+};
