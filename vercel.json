@@ -1,0 +1,13 @@
+{
+  "crons": [
+    {
+      "path": "/api/check-events",
+      "schedule": "0 23 * * *"
+    }
+  ],
+  "functions": {
+    "api/check-events.js": {
+      "maxDuration": 60
+    }
+  }
+}
