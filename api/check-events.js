@@ -9,13 +9,14 @@ function log(msg) {
   console.log(`[${new Date().toISOString()}] ${msg}`);
 }
 
+const MONTH_NAMES = 'January|February|March|April|May|June|July|August|September|October|November|December|Jan|Feb|Mar|Apr|Jun|Jul|Aug|Sep|Oct|Nov|Dec';
+
 function parseDates(text) {
   const patterns = [
-    /(\d{1,2}(?:st|nd|rd|th)?\s+(?:January|February|March|April|May|June|July|August|September|October|November|December)\s+\d{4})/gi,
-    /((?:January|February|March|April|May|June|July|August|September|October|November|December)\s+\d{1,2}(?:st|nd|rd|th)?,?\s*\d{4})/gi,
+    new RegExp(`(\\d{1,2}(?:st|nd|rd|th)?\\s+(?:${MONTH_NAMES})\\s+\\d{4})`, 'gi'),
+    new RegExp(`((?:${MONTH_NAMES})\\s+\\d{1,2}(?:st|nd|rd|th)?,?\\s*\\d{4})`, 'gi'),
     /(\d{4}-\d{2}-\d{2})/g,
     /(\d{1,2}\/\d{1,2}\/\d{4})/g,
-    /(\d{1,2}\s+(?:Jan|Feb|Mar|Apr|May|Jun|Jul|Aug|Sep|Oct|Nov|Dec)[a-z]*\.?\s+\d{4})/gi
   ];
   const found = new Set();
   patterns.forEach(p => {
@@ -52,39 +53,70 @@ async function fetchPage(url) {
   return res.text();
 }
 
+// Try to find a meaningful title near a date string in the HTML
+function findTitleNearDate(html, dateStr) {
+  // Look for the date in context and grab nearby heading text
+  const idx = html.indexOf(dateStr);
+  if (idx === -1) return null;
+  // Look back up to 600 chars for a heading or link text
+  const before = html.substring(Math.max(0, idx - 600), idx);
+  // Extract last heading or anchor text before the date
+  const headingMatch = before.match(/(?:<h[1-6][^>]*>|<a[^>]*>)([\s\S]*?)(?:<\/h[1-6]>|<\/a>)/gi);
+  if (headingMatch && headingMatch.length > 0) {
+    const last = headingMatch[headingMatch.length - 1];
+    const text = last.replace(/<[^>]+>/g, '').trim();
+    if (text && text.length > 3 && text.length < 120) return text;
+  }
+  return null;
+}
+
 function extractEvents(html, url) {
   const $ = cheerio.load(html);
   const events = [];
 
-  $('[class*="tribe-event"], [class*="event-item"], article.type-tribe_events').each((i, el) => {
-    const title = $(el).find('[class*="tribe-event-title"], [class*="event-title"], h2, h3, h4').first().text().trim();
-    const dateEl = $(el).find('[class*="tribe-event-date"], [class*="datetime"], time, .event-date').first();
+  // 1. Try The Events Calendar / tribe plugin structure
+  $('[class*="tribe-event"], article.type-tribe_events, .tribe_events_cat').each((i, el) => {
+    const title = $(el).find('[class*="tribe-event-title"], h1, h2, h3').first().text().trim();
+    const dateEl = $(el).find('[class*="tribe-event-date"], time, [class*="datetime"]').first();
     const dateText = dateEl.attr('datetime') || dateEl.text().trim();
-    if (title || dateText) {
-      events.push({ title: title || `Event ${i + 1}`, dateStr: dateText, source: url });
-    }
+    if (title || dateText) events.push({ title: title || null, dateStr: dateText, source: url });
   });
 
+  // 2. Try WooCommerce / general product/event cards
   if (events.length === 0) {
-    $('time').each((i, el) => {
-      const dt = $(el).attr('datetime') || $(el).text().trim();
-      const title = $(el).closest('article, section, li, div').find('h1,h2,h3,h4,a').first().text().trim() || `Event ${i + 1}`;
-      if (dt) events.push({ title: title.substring(0, 100), dateStr: dt, source: url });
+    $('article, .elementor-post, .event, .product').each((i, el) => {
+      const title = $(el).find('h1, h2, h3, h4, .title, .entry-title').first().text().trim();
+      const dateEl = $(el).find('time, [class*="date"]').first();
+      const dateText = dateEl.attr('datetime') || dateEl.text().trim();
+      const dates = parseDates($(el).text());
+      if (dates.length > 0) {
+        events.push({ title: title || null, dateStr: dates[0], source: url });
+      }
     });
   }
 
+  // 3. Fallback: find all dates in page text, look for nearby title in HTML
   if (events.length === 0) {
-    const bodyText = $('main, #content, .content, body').text();
+    const bodyText = $('body').text();
     const dates = parseDates(bodyText);
-    dates.slice(0, 15).forEach((ds, i) => {
-      events.push({ title: `Date reference ${i + 1}`, dateStr: ds, source: url });
+    dates.slice(0, 20).forEach(ds => {
+      const nearbyTitle = findTitleNearDate(html, ds);
+      events.push({ title: nearbyTitle, dateStr: ds, source: url });
     });
   }
 
-  return events.map(e => {
-    const date = parseDate(e.dateStr);
-    return { ...e, date, status: classifyDate(date) };
-  });
+  // Build final event list with smart labels
+  return events
+    .filter(e => e.dateStr)
+    .map(e => {
+      const date = parseDate(e.dateStr);
+      const status = classifyDate(date);
+      // Format: use found title, or build a clean label from the date itself
+      const label = e.title && e.title.length > 3
+        ? e.title
+        : `Event — ${e.dateStr}`;
+      return { title: label, dateStr: e.dateStr, date, status, source: url };
+    });
 }
 
 async function sendEmail(expired, expiringSoon) {
@@ -108,7 +140,7 @@ async function sendEmail(expired, expiringSoon) {
   if (expired.length > 0) {
     html += `<h3 style="color:#c0392b">Expired events (${expired.length})</h3><ul>`;
     expired.forEach(e => {
-      html += `<li style="margin-bottom:6px"><strong>${e.title}</strong><br>
+      html += `<li style="margin-bottom:8px"><strong>${e.title}</strong><br>
         <span style="color:#999;font-size:13px">${e.dateStr} · <a href="${e.source}">${e.source}</a></span></li>`;
     });
     html += '</ul>';
@@ -117,7 +149,7 @@ async function sendEmail(expired, expiringSoon) {
   if (expiringSoon.length > 0) {
     html += `<h3 style="color:#e67e22">Expiring soon (${expiringSoon.length})</h3><ul>`;
     expiringSoon.forEach(e => {
-      html += `<li style="margin-bottom:6px"><strong>${e.title}</strong><br>
+      html += `<li style="margin-bottom:8px"><strong>${e.title}</strong><br>
         <span style="color:#999;font-size:13px">${e.dateStr} · <a href="${e.source}">${e.source}</a></span></li>`;
     });
     html += '</ul>';
